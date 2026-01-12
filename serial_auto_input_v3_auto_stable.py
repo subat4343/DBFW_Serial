@@ -66,12 +66,14 @@ class RelativeCoordThread(QThread):
         self.running = False
 
 class CameraLabel(QLabel):
-    """ (変更なし) ROI描画とマウス座標特定機能"""
-    mouse_pos_signal = pyqtSignal(int, int)
+    """ (修正) ROI描画とマウス座標特定機能 + Successオーバーレイ """
+    mouse_pos_signal = pyqtSignal(int, int) 
     def __init__(self, text):
         super().__init__(text); self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet("background-color: black; color: white;"); self.pixmap_size = None
-        self.image_origin = None; self.roi_rect = QRect(); self.setMouseTracking(True)
+        self.image_origin = None; self.roi_rect = QRect(); self.setMouseTracking(True) 
+        self.show_success_overlay = False # ▼▼▼ 追加 ▼▼▼
+
     def setPixmap(self, pixmap):
         super().setPixmap(pixmap); self.pixmap_size = pixmap.size()
         if self.pixmap_size:
@@ -79,20 +81,53 @@ class CameraLabel(QLabel):
             margin_y = (self.height() - self.pixmap_size.height()) // 2
             self.image_origin = (margin_x, margin_y)
         else: self.image_origin = None
+        
     def set_roi(self, x1, y1, x2, y2): self.roi_rect = QRect(x1, y1, x2 - x1, y2 - y1); self.update()
+    
+    # ▼▼▼ 追加 ▼▼▼
+    def set_success_overlay(self, visible):
+        """Success! 表示のオン/オフを切り替え、再描画を要求する"""
+        self.show_success_overlay = visible
+        self.update() # paintEventをトリガー
+    # ▲▲▲ 追加 ▲▲▲
+
     def mouseMoveEvent(self, event):
         if self.image_origin:
             ox, oy = self.image_origin; local_x = event.pos().x() - ox; local_y = event.pos().y() - oy
             if 0 <= local_x < self.pixmap_size.width() and 0 <= local_y < self.pixmap_size.height():
                 self.mouse_pos_signal.emit(local_x, local_y)
             else: self.mouse_pos_signal.emit(-1, -1)
+
+    # ▼▼▼ 修正 (paintEvent) ▼▼▼
     def paintEvent(self, event):
-        super().paintEvent(event)
+        super().paintEvent(event) 
+        painter = QPainter(self) # Painterを早期に初期化
+
+        # 1. ROIの描画
         if self.image_origin and not self.roi_rect.isNull():
-            painter = QPainter(self); ox, oy = self.image_origin
+            ox, oy = self.image_origin
             draw_rect = self.roi_rect.translated(ox, oy)
-            pen = QPen(Qt.GlobalColor.red, 2); painter.setPen(pen)
-            painter.drawRect(draw_rect); painter.end()
+            pen = QPen(Qt.GlobalColor.red, 2)
+            painter.setPen(pen)
+            painter.drawRect(draw_rect)
+
+        # 2. Successオーバーレイの描画
+        if self.show_success_overlay:
+            # フォント設定
+            font = painter.font()
+            font.setPointSize(48) # 大きなフォントサイズ
+            font.setBold(True)
+            painter.setFont(font)
+            
+            # ペン（色）設定
+            pen = QPen(Qt.GlobalColor.green, 3) # 太い緑色のペン
+            painter.setPen(pen)
+            
+            # 中央揃えでテキストを描画
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Success!")
+
+        painter.end() # 最後にPainterを終了
+    # ▲▲▲ 修正 ▲▲▲
 
 # -----------------------------------------------
 # (BatchInputThread は変更なし)
@@ -272,6 +307,13 @@ class MainWindow(QMainWindow):
         self.batch_thread = None
         self.ocr_thread = None # ▼▼▼ 変更
         
+        # ▼▼▼ 追加 ▼▼▼
+        # Success表示用のワンショットタイマー
+        self.success_timer = QTimer(self)
+        self.success_timer.setSingleShot(True)
+        self.success_timer.timeout.connect(self.hide_success_overlay)
+        # ▲▲▲ 追加 ▲▲▲
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(); central_widget.setLayout(main_layout)
@@ -565,11 +607,15 @@ class MainWindow(QMainWindow):
             self.status_label.setText(text)
     # ▲▲▲ 追加 ▲▲▲
 
-    # ▼▼▼ 追加: 安定化したコードをプールに追加するスロット ▼▼▼
+# ▼▼▼ 修正 (add_code_to_pool) ▼▼▼
     @pyqtSlot(str)
     def add_code_to_pool(self, stable_code):
         """OCRスレッドから安定化コードを受け取り、リストに追加する"""
         
+        # 成功表示をトリガー (重複チェックの前に行う)
+        self.camera_label.set_success_overlay(True)
+        self.success_timer.start(1000) # 1秒タイマー開始
+            
         # 既にリストにないか確認
         items = [self.pool_list_widget.item(i).text() for i in range(self.pool_list_widget.count())]
         if stable_code not in items:
@@ -578,7 +624,8 @@ class MainWindow(QMainWindow):
             print(f"プールに自動追加: '{stable_code}'")
         else:
             print(f"コードは既にプールに存在: '{stable_code}'")
-    # ▲▲▲ 追加 ▲▲▲
+            # (表示は既に行われている)
+    # ▲▲▲ 修正 ▲▲▲
         
     def set_gui_enabled(self, enabled):
         # 認識ボタンは削除された
@@ -590,6 +637,13 @@ class MainWindow(QMainWindow):
     def on_batch_finished(self):
         print("バッチ処理スレッド正常終了。ウィンドウを閉じます。")
         self.close() # 処理完了後にアプリを閉じる
+
+    # ▼▼▼ 追加 (hide_success_overlay) ▼▼▼
+    @pyqtSlot()
+    def hide_success_overlay(self):
+        """タイマーが切れたらSuccess表示を消す"""
+        self.camera_label.set_success_overlay(False)
+    # ▲▲▲ 追加 ▲▲▲
 
     # ▼▼▼ 追加: 設定保存・読込メソッド ▼▼▼
     def save_settings(self):
