@@ -71,7 +71,8 @@ class CameraLabel(QLabel):
     def __init__(self, text):
         super().__init__(text); self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet("background-color: black; color: white;"); self.pixmap_size = None
-        self.image_origin = None; self.roi_rect = QRect(); self.setMouseTracking(True) 
+        self.image_origin = None; self.roi_rect = QRect(); self.setMouseTracking(True)
+        self.original_size = (1, 1) # ▼▼▼ 追加: 元画像のサイズ (初期値) ▼▼▼
         self.show_success_overlay = False # ▼▼▼ 追加 ▼▼▼
 
     def setPixmap(self, pixmap):
@@ -81,7 +82,9 @@ class CameraLabel(QLabel):
             margin_y = (self.height() - self.pixmap_size.height()) // 2
             self.image_origin = (margin_x, margin_y)
         else: self.image_origin = None
-        
+    # ▼▼▼ 追加: 元画像のサイズをセットするメソッド ▼▼▼
+    def set_original_size(self, w, h): self.original_size = (w, h)
+
     def set_roi(self, x1, y1, x2, y2): self.roi_rect = QRect(x1, y1, x2 - x1, y2 - y1); self.update()
     
     # ▼▼▼ 追加 ▼▼▼
@@ -95,7 +98,15 @@ class CameraLabel(QLabel):
         if self.image_origin:
             ox, oy = self.image_origin; local_x = event.pos().x() - ox; local_y = event.pos().y() - oy
             if 0 <= local_x < self.pixmap_size.width() and 0 <= local_y < self.pixmap_size.height():
-                self.mouse_pos_signal.emit(local_x, local_y)
+                # ▼▼▼ 修正: スケールを考慮して元画像の座標に変換 ▼▼▼
+                org_w, org_h = self.original_size
+                if org_w > 0 and org_h > 0:
+                    scale_x = self.pixmap_size.width() / org_w
+                    scale_y = self.pixmap_size.height() / org_h
+                    real_x = int(local_x / scale_x); real_y = int(local_y / scale_y)
+                    self.mouse_pos_signal.emit(real_x, real_y)
+                else:
+                    self.mouse_pos_signal.emit(local_x, local_y)
             else: self.mouse_pos_signal.emit(-1, -1)
 
     # ▼▼▼ 修正 (paintEvent) ▼▼▼
@@ -105,8 +116,16 @@ class CameraLabel(QLabel):
 
         # 1. ROIの描画
         if self.image_origin and not self.roi_rect.isNull():
-            ox, oy = self.image_origin
-            draw_rect = self.roi_rect.translated(ox, oy)
+            ox, oy = self.image_origin            
+            # ▼▼▼ 追加: ROI座標を表示サイズに合わせてスケーリング ▼▼▼
+            org_w, org_h = self.original_size
+            scale_x = self.pixmap_size.width() / org_w if org_w > 0 else 1.0
+            scale_y = self.pixmap_size.height() / org_h if org_h > 0 else 1.0
+            r = self.roi_rect
+            scaled_rect = QRect(int(r.x()*scale_x), int(r.y()*scale_y), int(r.width()*scale_x), int(r.height()*scale_y))
+            draw_rect = scaled_rect.translated(ox, oy)
+            # ▲▲▲ 追加 ▲▲▲
+
             pen = QPen(Qt.GlobalColor.red, 2)
             painter.setPen(pen)
             painter.drawRect(draw_rect)
@@ -241,6 +260,48 @@ class OcrRecognitionThread(QThread):
         self.frame_to_ocr = image.copy() if image is not None else None
         self.request_ocr = True
 
+    def fix_char_pre_classification(self, char, h, max_h):
+        """
+        高さで「数値」か「文字」かを事前判定し、強制的に型にはめる
+        前提: 数値(2-9)は背が高く、文字(A-Z)は背が低い
+        追加対応: 8vsB, 6vsG, 9vsD, Zvs2, Svs5
+        除外文字: 0, 1, I, O (これらは他へマッピング)
+        """
+
+        # 高さの比率（現在の文字 ÷ 最大の文字）
+        ratio = h / max_h
+        # 閾値: 最大高さの 92% 以上なら「数値」とみなす
+        is_tall_number = ratio > 0.92
+
+        if is_tall_number:
+            # --- 数値グループ (2-9) としての補正 ---
+            if char == 'Z': return '2'
+            if char == 'S': return '5'
+            if char == 'B': return '8' # 8 vs B
+            if char == 'G': return '6' # 6 vs G
+
+            # 9の誤認識パターン (O, 0, I, 1, D, Q など)
+            # 0, 1, O, I は存在しないため、これらは 9 の可能性が高い
+            # D, Q も背が高いなら 9 (Dは本来背が低いはずだが、誤認識でここに来た場合)
+            if char in ['O', '0', 'D', 'Q', 'I', '1', 'l']:
+                return '9'
+
+            return char
+
+        else:
+            # --- 文字グループ (A-Z) としての補正 ---
+            if char == '2': return 'Z'
+            if char == '5': return 'S'
+            if char == '8': return 'B' # 8 vs B
+            if char == '6': return 'G' # 6 vs G
+
+            # Dの誤認識パターン (0, O)
+            # 背が低いのに 0 や O と認識された -> D の可能性が高い
+            if char in ['0', 'O']:
+                return 'D'
+
+        return char
+
     def run(self):
         config_psm7 = '--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
         
@@ -250,10 +311,46 @@ class OcrRecognitionThread(QThread):
                 frame_ocr = self.frame_to_ocr
 
                 try:
-                    # Tesseract OCR 実行
-                    raw_text = pytesseract.image_to_string(frame_ocr, lang='eng', config=config_psm7)
-                    processed_code = re.sub(r'[^A-Z0-9]', '', raw_text.upper())
+                    # ▼▼▼ 変更: image_to_boxes で座標付きOCRを実行 ▼▼▼
+                    # 座標を取得して、形状による補正を行う
+                    boxes = pytesseract.image_to_boxes(frame_ocr, lang='eng', config=config_psm7)
+                    
+                    char_data_list = []
+                    
+                    # 1. まず全文字のデータをパースしてリスト化
+                    for b in boxes.splitlines():
+                        b = b.split(' ')
+                        if len(b) < 6: continue
+                        
+                        char = b[0]
+                        # TesseractのY座標を取得 (高さ計算のみに使用)
+                        y1_tess = int(b[2])
 
+                        y2_tess = int(b[4])
+
+                        h_char = y2_tess - y1_tess
+
+                        char_data_list.append({
+                            'char': char,
+                            'h': h_char
+                        })
+
+                    if not char_data_list:
+                        continue
+
+                    # 2. 高さの基準値（最大値）を算出
+                    # ノイズで極端に大きな枠が取れてしまう場合は調整が必要ですが、基本は最大値でOK
+                    max_h = max(c['h'] for c in char_data_list)
+
+                    # 3. 高さによる補正を行いながら文字列を結合
+                    final_chars = []
+                    for c_data in char_data_list:
+                        fixed_char = self.fix_char_pre_classification(c_data['char'], c_data['h'], max_h)
+                        final_chars.append(fixed_char)
+
+                    raw_text = "".join(final_chars)
+                    processed_code = re.sub(r'[^A-Z0-9]', '', raw_text.upper())
+                    # ▲▲▲ 変更終了 ▲▲▲
                     # 16桁かチェック
                     if len(processed_code) != 16:
                         if self.streak > 0: # ストリークが途切れた
@@ -446,6 +543,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot(QImage, object)
     def update_camera_feed(self, qt_image, cv_frame):
         self.current_cv_frame = cv_frame 
+        h, w, ch = cv_frame.shape; self.camera_label.set_original_size(w, h) # ▼▼▼ 追加: サイズ通知 ▼▼▼
         scaled_pixmap = QPixmap.fromImage(qt_image).scaled(
             self.camera_label.width(), self.camera_label.height(),
             Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
@@ -483,6 +581,7 @@ class MainWindow(QMainWindow):
         if self.current_cv_frame is None: return
         try:
             # 1. ROI切り出し
+            # ROIは元画像の座標系で指定される
             x1 = int(self.roi_x1_input.text()); y1 = int(self.roi_y1_input.text())
             x2 = int(self.roi_x2_input.text()); y2 = int(self.roi_y2_input.text())
             if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1: raise ValueError("ROI座標が不正です")
