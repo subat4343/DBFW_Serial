@@ -1,3 +1,4 @@
 {
-    "python-envs.pythonProjects": []
+    "python.defaultInterpreterPath": "${workspaceFolder}/venv/Scripts/python.exe",
+    "python.terminal.activateEnvInCurrentTerminal": true
 }
