@@ -6,15 +6,17 @@ import pygetwindow
 import re
 import numpy as np
 import time
+import datetime
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QPushButton, QLabel, QLineEdit, QFormLayout,
-    QGroupBox, QListWidget, QSlider, QCheckBox, QComboBox
+    QGroupBox, QListWidget, QSlider, QCheckBox, QComboBox,
+    QStyledItemDelegate, QStyle
 )
 from PyQt6.QtCore import (
     QThread, pyqtSignal, Qt, QTimer, pyqtSlot, QRect, QSettings
 )
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QTextDocument
 
 # --- Tesseract-OCRのパス設定 ---
 try:
@@ -147,7 +149,38 @@ class CameraLabel(QLabel):
 
         painter.end() # 最後にPainterを終了
     # ▲▲▲ 修正 ▲▲▲
+# ▼▼▼ 追加: 数字だけを赤く表示するためのデリゲート ▼▼▼
+class NumberHighlightDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        painter.save()
+        
+        # 1. 選択状態の背景を描画
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
 
+        # 2. テキストを取得し、数字部分をHTMLで赤色・太字に装飾
+        text = index.data()
+        # 数字(0-9)を 赤色(#FF0000) かつ 太字(<b>) に置換
+        html_text = re.sub(r'([0-9]+)', r'<font color="#FF0000"><b>\1</b></font>', text)
+
+        # 3. 通常テキストの色（選択時は白、通常は黒などシステム準拠）を取得
+        text_color = option.palette.text().color().name()
+        if option.state & QStyle.StateFlag.State_Selected:
+            text_color = option.palette.highlightedText().color().name()
+
+        # 4. HTML描画用のドキュメントを作成
+        doc = QTextDocument()
+        doc.setDefaultFont(option.font)
+        doc.setHtml(f"<div style='color:{text_color}'>{html_text}</div>")
+        
+        # 5. 指定位置に描画
+        painter.translate(option.rect.x(), option.rect.y())
+        doc.drawContents(painter)
+
+        painter.restore()
+# ▲▲▲ 追加 ▲▲▲
+
+#
 # -----------------------------------------------
 # (BatchInputThread は変更なし)
 # -----------------------------------------------
@@ -162,6 +195,17 @@ class BatchInputThread(QThread):
         self.codes = codes_to_input
         self.settings = settings
         self.running = True
+
+    def save_codes_to_file(self):
+        """現在のコードリストを日時付きファイルに保存する"""
+        try:
+            now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"result_{now}.txt"
+            with open(filename, "w") as f:
+                f.write("\n".join(self.codes))
+            return filename
+        except Exception as e:
+            return None
 
     def run(self):
         try:
@@ -195,6 +239,10 @@ class BatchInputThread(QThread):
             for i, code in enumerate(self.codes):
                 if not self.running:
                     self.progress_signal.emit("一括処理が中断されました。")
+                    # ▼▼▼ 追加: 中断時のファイル保存 ▼▼▼
+                    saved = self.save_codes_to_file()
+                    if saved: self.progress_signal.emit(f"ログ保存: {saved}")
+                    # ▲▲▲ 追加 ▲▲▲
                     return
                 
                 status_msg = f"入力中 ({i+1}/{len(self.codes)}): {code}"
@@ -226,6 +274,10 @@ class BatchInputThread(QThread):
                 time.sleep(wait_paste_loop) 
 
             self.progress_signal.emit(f"完了: {len(self.codes)}件のコードが入力されました。")
+            # ▼▼▼ 追加: 完了時のファイル保存 ▼▼▼
+            saved = self.save_codes_to_file()
+            if saved: self.progress_signal.emit(f"ログ保存完了: {saved}")
+            # ▲▲▲ 追加 ▲▲▲
             time.sleep(1) 
 
         except Exception as e:
@@ -484,7 +536,9 @@ class MainWindow(QMainWindow):
         workflow_group = QGroupBox("B. ワークフロー"); workflow_layout = QVBoxLayout()
         
         self.pool_list_widget = QListWidget(); workflow_layout.addWidget(self.pool_list_widget)
-        
+        # ▼▼▼ 追加: 数字ハイライト機能をリストに適用 ▼▼▼
+        self.pool_list_widget.setItemDelegate(NumberHighlightDelegate())
+        # ▲▲▲ 追加 ▲▲▲        
         self.delete_button = QPushButton("① 選択を削除")
         self.delete_button.setStyleSheet("font-size: 14px; background-color: #dc3545; color: white; padding: 5px;")
         self.delete_button.clicked.connect(self.delete_selected_item)
