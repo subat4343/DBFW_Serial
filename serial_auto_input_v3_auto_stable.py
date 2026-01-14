@@ -153,7 +153,9 @@ class BatchInputThread(QThread):
             click_y = self.settings['click_y']
             close_x = self.settings['close_x']
             close_y = self.settings['close_y']
-
+            wait_paste_first = self.settings['wait_paste_first']
+            wait_close = self.settings['wait_close']
+            wait_paste_loop = self.settings['wait_paste_loop']
             windows = pygetwindow.getWindowsWithTitle(target_title)
             if not windows:
                 self.progress_signal.emit(f"エラー: ウィンドウ '{target_title}' が見つかりません。")
@@ -168,7 +170,7 @@ class BatchInputThread(QThread):
             target_win.activate()
             
             # OSがウィンドウのフォーカスを切り替えるための「猶予時間」
-            time.sleep(1.5) # 1秒待機
+            time.sleep(wait_paste_first) 
             # ▲▲▲ 追加 ▲▲▲
 
             for i, code in enumerate(self.codes):
@@ -192,17 +194,17 @@ class BatchInputThread(QThread):
 
                 # 1. 貼り付け位置をクリック + 入力
                 pyautogui.click(abs_paste_x, abs_paste_y, duration=0.1)
-                pyautogui.write(code, interval=0.01)
+                pyautogui.write(code, interval=0.001)
                 
                 # 2. 決定ボタンをクリック
                 pyautogui.click(abs_click_x, abs_click_y, duration=0.1)
                 
                 # 3. 閉じるボタンをクリック
-                time.sleep(3.0) 
+                time.sleep(wait_close) 
                 pyautogui.click(abs_close_x, abs_close_y, duration=0.1)
                 
                 # 4. 次の入力までの待機
-                time.sleep(3.0) 
+                time.sleep(wait_paste_loop) 
 
             self.progress_signal.emit(f"完了: {len(self.codes)}件のコードが入力されました。")
             time.sleep(1) 
@@ -369,6 +371,14 @@ class MainWindow(QMainWindow):
         self.close_x_input = QLineEdit("0"); self.close_y_input = QLineEdit("0") 
         close_coords_layout = QHBoxLayout(); close_coords_layout.addWidget(self.close_x_input); close_coords_layout.addWidget(self.close_y_input)
         settings_layout.addRow("閉じる 座標 (X, Y):", close_coords_layout)
+
+        # --- 待機時間設定 (新規追加) ---
+        self.wait_paste_first_input = QLineEdit("1.5"); self.wait_close_input = QLineEdit("3.0"); self.wait_paste_loop_input = QLineEdit("3.0")
+        wait_layout = QHBoxLayout()
+        wait_layout.addWidget(QLabel("初回Paste前:")); wait_layout.addWidget(self.wait_paste_first_input)
+        wait_layout.addWidget(QLabel("Close前:")); wait_layout.addWidget(self.wait_close_input)
+        wait_layout.addWidget(QLabel("Loop・Paste前:")); wait_layout.addWidget(self.wait_paste_loop_input)
+        settings_layout.addRow("待機時間(秒):", wait_layout)
         
         self.settings_group.setLayout(settings_layout); right_layout.addWidget(self.settings_group) 
         # ▲▲▲ 修正 ▲▲▲
@@ -567,6 +577,9 @@ class MainWindow(QMainWindow):
                 'click_y': int(self.click_y_input.text()),
                 'close_x': int(self.close_x_input.text()), 
                 'close_y': int(self.close_y_input.text()), 
+                'wait_paste_first': float(self.wait_paste_first_input.text()),
+                'wait_close': float(self.wait_close_input.text()),
+                'wait_paste_loop': float(self.wait_paste_loop_input.text()),
             }
         except ValueError:
             self.status_label.setText("ステータス: 座標(X, Y)が数字ではありません")
@@ -672,6 +685,11 @@ class MainWindow(QMainWindow):
         settings.setValue("auto/close_x", self.close_x_input.text())
         settings.setValue("auto/close_y", self.close_y_input.text())
 
+        # 待機時間
+        settings.setValue("auto/wait_paste_first", self.wait_paste_first_input.text())
+        settings.setValue("auto/wait_close", self.wait_close_input.text())
+        settings.setValue("auto/wait_paste_loop", self.wait_paste_loop_input.text())
+
     def load_settings(self):
         """保存された設定をGUIに読み込む"""
         print("設定を読み込んでいます...")
@@ -697,7 +715,12 @@ class MainWindow(QMainWindow):
         self.click_y_input.setText(settings.value("auto/click_y", "860"))
         self.close_x_input.setText(settings.value("auto/close_x", "0"))
         self.close_y_input.setText(settings.value("auto/close_y", "0"))
-        
+
+        # 待機時間
+        self.wait_paste_first_input.setText(settings.value("auto/wait_paste_first", "1.5"))
+        self.wait_close_input.setText(settings.value("auto/wait_close", "3.0"))
+        self.wait_paste_loop_input.setText(settings.value("auto/wait_paste_loop", "3.0"))  
+
         print("設定の読み込み完了。")
     # ▲▲▲ 追加 ▲▲▲
 
